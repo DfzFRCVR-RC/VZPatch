@@ -19,11 +19,14 @@ jobs:
         distribution: 'temurin'
         java-version: '17'
 
-    - name: Set up Android SDK
-      uses: android-actions/setup-android@v3
-
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
+
+    - name: Show Android SDK
+      run: |
+        echo "ANDROID_HOME=$ANDROID_HOME"
+        ls "$ANDROID_HOME" 2>/dev/null || echo "ANDROID_HOME not set"
+        ls "$ANDROID_HOME/platforms" 2>/dev/null || echo "no platforms dir"
 
     - name: Build VZPatch
       run: ./gradlew buildAll --no-daemon
@@ -35,3 +38,5 @@ jobs:
         path: |
           jar/build/outputs/
           manager/build/outputs/
+          **/build/outputs/apk/**/*.apk
+          **/build/libs/*.jar
