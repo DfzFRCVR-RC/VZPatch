@@ -93,8 +93,14 @@ public class LSPApplication {
         LSPLoader.initModules(appLoadedApk);
         Log.i(TAG, "Modules initialized");
 
-        switchAllClassLoader();
-        SigBypass.doSigBypass(context, config.sigBypassLevel);
+        if (!config.strictMode) {
+            // non-strict mode: switch classloader to the extracted original apk and bypass signature
+            switchAllClassLoader();
+            SigBypass.doSigBypass(context, config.sigBypassLevel);
+        } else {
+            // strict mode: NEVER touch signature verification, just run the injection program.
+            Log.i(TAG, "strict mode: skip classloader switch and signature bypass entirely");
+        }
 
         Log.i(TAG, "LSPatch bootstrap completed");
     }
@@ -117,6 +123,26 @@ public class LSPApplication {
             }
             Log.i(TAG, "Use manager: " + config.useManager);
             Log.i(TAG, "Signature bypass level: " + config.sigBypassLevel);
+            Log.i(TAG, "Strict mode: " + config.strictMode);
+
+            if (config.strictMode) {
+                // STRICT MODE: the app code (dex) was copied directly into this apk by VZPatch.
+                // There is no nested origin.apk, so we must NOT extract anything, must NOT switch
+                // sourceDir, and must NOT touch any signature related logic.
+                // appLoadedApk is simply the current (patched) apk itself.
+                appLoadedApk = stubLoadedApk;
+                var context = (Context) XposedHelpers.callStaticMethod(Class.forName("android.app.ContextImpl"), "createAppContext", activityThread, stubLoadedApk);
+                if (config.appComponentFactory != null) {
+                    try {
+                        context.getClassLoader().loadClass(config.appComponentFactory);
+                    } catch (ClassNotFoundException e) {
+                        Log.w(TAG, "Original AppComponentFactory not found: " + config.appComponentFactory);
+                        appInfo.appComponentFactory = null;
+                    }
+                }
+                Log.i(TAG, "strict mode: run app code from this apk directly, no origin.apk, no sig bypass");
+                return context;
+            }
 
             Path originPath = Paths.get(appInfo.dataDir, "cache/lspatch/origin/");
             Path cacheApkPath;

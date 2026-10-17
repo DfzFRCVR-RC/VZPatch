@@ -9,6 +9,7 @@ import static org.lsposed.lspatch.share.Constants.PROXY_APP_COMPONENT_FACTORY;
 import com.android.tools.build.apkzlib.sign.SigningExtension;
 import com.android.tools.build.apkzlib.sign.SigningOptions;
 import com.android.tools.build.apkzlib.zip.AlignmentRules;
+import com.android.tools.build.apkzlib.zip.CompressionMethod;
 import com.android.tools.build.apkzlib.zip.StoredEntry;
 import com.android.tools.build.apkzlib.zip.ZFile;
 import com.android.tools.build.apkzlib.zip.ZFileOptions;
@@ -85,6 +86,8 @@ public class LSPatch {
     private boolean useManager = false;
 
     @Parameter(names = {"-r", "--allowdown"}, description = "Allow downgrade installation by overriding versionCode to 1 (In most cases, the app can still get the correct versionCode)")
+    @Parameter(names = {"-s", "--strict"}, description = "Strict mode: NEVER touch signature verification. Do NOT embed original apk, do NOT collect original signature, do NOT switch classloader at runtime. Only run the injection program. APK size stays small. (Use only when the target app has no signature self-check)")
+    private boolean strictMode = false;
     private boolean overrideVersionCode = false;
 
     @Parameter(names = {"-v", "--verbose"}, description = "Verbose output")
@@ -126,6 +129,14 @@ public class LSPatch {
             logger.e("Should not use --embed and --manager at the same time\n");
             help = true;
         }
+        if (strictMode && useManager) {
+            logger.e("Should not use --strict and --manager at the same time (strict mode is an integrated/embedded mode)\n");
+            help = true;
+        }
+        if (strictMode && sigbypassLevel > 0) {
+            logger.e("--strict conflicts with --sigbypasslv: strict mode never touches signature verification\n");
+            help = true;
+        }
 
         this.logger = logger;
         logger.verbose = verbose;
@@ -154,7 +165,7 @@ public class LSPatch {
             outputDir.mkdirs();
 
             File outputFile = new File(outputDir, String.format(
-                    Locale.getDefault(), "%s-%d-lspatched.apk",
+                    Locale.getDefault(), "%s-%d-vzpatched.apk",
                     FilenameUtils.getBaseName(apkFileName),
                     LSPConfig.instance.VERSION_CODE)
             ).getAbsoluteFile();
@@ -178,7 +189,9 @@ public class LSPatch {
         logger.i("Parsing original apk...");
 
         try (var dstZFile = ZFile.openReadWrite(outputFile, Z_FILE_OPTIONS);
-             var srcZFile = dstZFile.addNestedZip((ignore) -> ORIGINAL_APK_ASSET_PATH, srcApkFile, false)) {
+             var srcZFile = strictMode
+                     ? ZFile.openReadOnly(srcApkFile)
+                     : dstZFile.addNestedZip((ignore) -> ORIGINAL_APK_ASSET_PATH, srcApkFile, false)) {
 
             // sign apk
             try {
@@ -234,7 +247,7 @@ public class LSPatch {
 
             logger.i("Patching apk...");
             // modify manifest
-            final var config = new PatchConfig(useManager, debuggableFlag, overrideVersionCode, sigbypassLevel, originalSignature, appComponentFactory);
+            final var config = new PatchConfig(useManager, debuggableFlag, overrideVersionCode, sigbypassLevel, originalSignature, appComponentFactory, strictMode);
             final var configBytes = new Gson().toJson(config).getBytes(StandardCharsets.UTF_8);
             final var metadata = Base64.getEncoder().encodeToString(configBytes);
             try (var is = new ByteArrayInputStream(modifyManifestFile(manifestEntry.open(), metadata, minSdkVersion))) {
@@ -284,16 +297,45 @@ public class LSPatch {
                 embedModules(dstZFile);
             }
 
-            // create zip link
-            logger.d("Creating nested apk link...");
-
-            for (StoredEntry entry : srcZFile.entries()) {
-                String name = entry.getCentralDirectoryHeader().getName();
-                if (name.startsWith("classes") && name.endsWith(".dex")) continue;
-                if (dstZFile.get(name) != null) continue;
-                if (name.equals("AndroidManifest.xml")) continue;
-                if (name.startsWith("META-INF") && (name.endsWith(".SF") || name.endsWith(".MF") || name.endsWith(".RSA"))) continue;
-                srcZFile.addFileLink(name, name);
+            // copy original apk content into the patched apk
+            if (strictMode) {
+                // STRICT MODE: do NOT embed origin.apk, copy dex directly into the output apk.
+                // The original dex files are renamed (classes2.dex, classes3.dex ...) because
+                // classes.dex is reserved for the metaloader. Runtime then loads the app code
+                // from THIS apk's own dex — no original apk extraction, no classloader switch,
+                // no signature bypass at all. APK size stays the same as the original.
+                logger.d("Strict mode: copying dex files directly...");
+                int dexIndex = 2;
+                for (StoredEntry entry : srcZFile.entries()) {
+                    String name = entry.getCentralDirectoryHeader().getName();
+                    if (name.startsWith("classes") && name.endsWith(".dex")) {
+                        try (var is = entry.open()) {
+                            dstZFile.add("classes" + dexIndex + ".dex", is);
+                        }
+                        logger.d("copied " + name + " -> classes" + dexIndex + ".dex");
+                        dexIndex++;
+                        continue;
+                    }
+                    if (dstZFile.get(name) != null) continue;
+                    if (name.equals("AndroidManifest.xml")) continue;
+                    if (name.startsWith("META-INF") && (name.endsWith(".SF") || name.endsWith(".MF") || name.endsWith(".RSA") || name.endsWith(".DSA") || name.endsWith(".EC"))) continue;
+                    var method = entry.getCentralDirectoryHeader().getMethod();
+                    boolean mayCompress = method == CompressionMethod.DEFLATE;
+                    try (var is = entry.open()) {
+                        dstZFile.add(name, is, !mayCompress);
+                    }
+                    logger.d("copied " + name);
+                }
+            } else {
+                logger.d("Creating nested apk link...");
+                for (StoredEntry entry : srcZFile.entries()) {
+                    String name = entry.getCentralDirectoryHeader().getName();
+                    if (name.startsWith("classes") && name.endsWith(".dex")) continue;
+                    if (dstZFile.get(name) != null) continue;
+                    if (name.equals("AndroidManifest.xml")) continue;
+                    if (name.startsWith("META-INF") && (name.endsWith(".SF") || name.endsWith(".MF") || name.endsWith(".RSA"))) continue;
+                    srcZFile.addFileLink(name, name);
+                }
             }
 
             dstZFile.realign();

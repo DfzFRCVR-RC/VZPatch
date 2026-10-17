@@ -8,6 +8,7 @@ public class PatchConfig {
     public final int sigBypassLevel;
     public final String originalSignature;
     public final String appComponentFactory;
+    public final boolean strictMode;
     public final LSPConfig lspConfig;
 
     public PatchConfig(
@@ -16,7 +17,8 @@ public class PatchConfig {
             boolean overrideVersionCode,
             int sigBypassLevel,
             String originalSignature,
-            String appComponentFactory
+            String appComponentFactory,
+            boolean strictMode
     ) {
         this.useManager = useManager;
         this.debuggable = debuggable;
@@ -24,6 +26,7 @@ public class PatchConfig {
         this.sigBypassLevel = sigBypassLevel;
         this.originalSignature = originalSignature;
         this.appComponentFactory = appComponentFactory;
+        this.strictMode = strictMode;
         this.lspConfig = LSPConfig.instance;
     }
 }
